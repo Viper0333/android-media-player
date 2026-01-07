@@ -13,14 +13,21 @@ class MusicAdapter(
     private val onClick: (File) -> Unit
 ) : RecyclerView.Adapter<MusicAdapter.ViewHolder>() {
 
-    inner class ViewHolder(val binding: ItemMusicBinding) :
+    inner class ViewHolder(private val binding: ItemMusicBinding) :
         RecyclerView.ViewHolder(binding.root) {
 
         fun bind(file: File) {
             binding.txtMusicName.text = file.name
 
             if (isVideo(file)) {
-                binding.imgThumb.setImageBitmap(getVideoThumbnail(file))
+                val thumb = getVideoThumbnail(file)
+                if (thumb != null) {
+                    binding.imgThumb.setImageBitmap(thumb)
+                } else {
+                    binding.imgThumb.setImageResource(
+                        android.R.drawable.ic_media_play
+                    )
+                }
             } else {
                 binding.imgThumb.setImageResource(
                     android.R.drawable.ic_media_play
@@ -46,10 +53,12 @@ class MusicAdapter(
         holder.bind(files[position])
     }
 
-    override fun getItemCount() = files.size
+    override fun getItemCount(): Int = files.size
 
     private fun isVideo(file: File): Boolean {
-        return file.extension.lowercase() in setOf("mp4", "mkv", "3gp", "webm")
+        return file.extension.lowercase() in listOf(
+            "mp4", "mkv", "3gp", "webm"
+        )
     }
 
     private fun getVideoThumbnail(file: File): Bitmap? {

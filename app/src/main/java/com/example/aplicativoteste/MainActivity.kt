@@ -1,15 +1,11 @@
 package com.example.aplicativoteste
 
-import android.Manifest
-import android.content.pm.PackageManager
+import android.media.MediaMetadataRetriever
 import android.media.MediaPlayer
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.widget.MediaController
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.example.aplicativoteste.databinding.ActivityMainBinding
 import java.io.File
@@ -17,18 +13,9 @@ import java.io.File
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private var mediaPlayer: MediaPlayer? = null
     private val mediaList = mutableListOf<File>()
-
-    // 🔹 PERMISSION LAUNCHER
-    private val permissionLauncher =
-        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) {
-                loadMediaFiles()
-            } else {
-                binding.txtNowPlaying.text = "Permissão negada"
-            }
-        }
+    private var mediaPlayer: MediaPlayer? = null
+    private var currentIndex = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,48 +25,24 @@ class MainActivity : AppCompatActivity() {
 
         binding.recyclerView.layoutManager = LinearLayoutManager(this)
 
-        checkPermission()
-    }
+        loadMedia()
 
-    // 🔹 PERMISSÕES CORRETAS ANDROID 13+
-    private fun checkPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        binding.btnPlay.setOnClickListener { playCurrent() }
 
-            val audioGranted = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_MEDIA_AUDIO
-            ) == PackageManager.PERMISSION_GRANTED
+        binding.btnPause.setOnClickListener {
+            mediaPlayer?.pause()
+            binding.videoView.pause()
+        }
 
-            val videoGranted = ContextCompat.checkSelfPermission(
-                this, Manifest.permission.READ_MEDIA_VIDEO
-            ) == PackageManager.PERMISSION_GRANTED
-
-            if (!audioGranted) {
-                permissionLauncher.launch(Manifest.permission.READ_MEDIA_AUDIO)
-                return
-            }
-
-            if (!videoGranted) {
-                permissionLauncher.launch(Manifest.permission.READ_MEDIA_VIDEO)
-                return
-            }
-
-            loadMediaFiles()
-
-        } else {
-            if (ContextCompat.checkSelfPermission(
-                    this,
-                    Manifest.permission.READ_EXTERNAL_STORAGE
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                permissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
-            } else {
-                loadMediaFiles()
+        binding.btnNext.setOnClickListener {
+            if (mediaList.isNotEmpty()) {
+                currentIndex = (currentIndex + 1) % mediaList.size
+                playCurrent()
             }
         }
     }
 
-    // 🔹 CARREGA MP3 / WAV / MP4
-    private fun loadMediaFiles() {
+    private fun loadMedia() {
         val dir = File("/storage/emulated/0/MUSICAS")
 
         if (!dir.exists() || !dir.isDirectory) {
@@ -91,30 +54,27 @@ class MainActivity : AppCompatActivity() {
 
         dir.listFiles()?.filter {
             it.isFile && it.extension.lowercase() in listOf(
-                "mp3", "wav", "mp4"
+                "mp3", "wav", "mp4", "mkv", "3gp", "webm"
             )
         }?.let {
             mediaList.addAll(it)
         }
 
-        if (mediaList.isEmpty()) {
-            binding.txtNowPlaying.text = "Nenhuma mídia encontrada"
+        binding.recyclerView.adapter = MusicAdapter(mediaList) { file ->
+            currentIndex = mediaList.indexOf(file)
+            playCurrent()
         }
-
-        binding.recyclerView.adapter =
-            MusicAdapter(mediaList) { file ->
-                playMedia(file)
-            }
     }
 
-    // 🔹 TOCA ÁUDIO OU VÍDEO
-    private fun playMedia(file: File) {
-        mediaPlayer?.release()
-        mediaPlayer = null
+    private fun playCurrent() {
+        if (mediaList.isEmpty()) return
 
-        val ext = file.extension.lowercase()
+        val file = mediaList[currentIndex]
+        binding.txtNowPlaying.text = file.name
 
-        if (ext == "mp4") {
+        stopAll()
+
+        if (isVideo(file)) {
             playVideo(file)
         } else {
             playAudio(file)
@@ -122,7 +82,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun playAudio(file: File) {
-        binding.videoView.stopPlayback()
         binding.videoView.visibility = android.view.View.GONE
 
         mediaPlayer = MediaPlayer().apply {
@@ -130,14 +89,9 @@ class MainActivity : AppCompatActivity() {
             prepare()
             start()
         }
-
-        binding.txtNowPlaying.text = "Tocando áudio: ${file.name}"
     }
 
     private fun playVideo(file: File) {
-        mediaPlayer?.release()
-        mediaPlayer = null
-
         binding.videoView.visibility = android.view.View.VISIBLE
 
         val controller = MediaController(this)
@@ -146,13 +100,22 @@ class MainActivity : AppCompatActivity() {
         binding.videoView.setMediaController(controller)
         binding.videoView.setVideoURI(Uri.fromFile(file))
         binding.videoView.start()
+    }
 
-        binding.txtNowPlaying.text = "Reproduzindo vídeo: ${file.name}"
+    private fun stopAll() {
+        mediaPlayer?.release()
+        mediaPlayer = null
+        binding.videoView.stopPlayback()
+    }
+
+    private fun isVideo(file: File): Boolean {
+        return file.extension.lowercase() in listOf(
+            "mp4", "mkv", "3gp", "webm"
+        )
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        mediaPlayer?.release()
-        binding.videoView.stopPlayback()
+        stopAll()
     }
 }
