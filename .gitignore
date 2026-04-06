@@ -1,0 +1,32 @@
+# Android Studio e IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+/out/
+
+# Android Build
+build/
+app/build/
+intermediates/
+outputs/
+generated/
+
+# Gradle
+.gradle/
+buildSrc/build/
+.gradle-cxx/
+
+# Local configuration
+local.properties
+
+# Logs
+*.log
+
+# Certs
+*.jks
+*.keystore
+
+# System
+.DS_Store
+Thumbs.db
