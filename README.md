@@ -54,4 +54,4 @@ Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para ma
 
 ---
 
-Desenvolvido por [Viper0333](https://github.com/Viper0333) 🚀
+Desenvolvido por Alex Santos 🚀
