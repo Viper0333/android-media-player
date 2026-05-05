@@ -1,4 +1,3 @@
-@file:OptIn(androidx.media3.common.util.UnstableApi::class)
 package com.example.modernplayer
 
 import android.app.Activity
@@ -61,6 +60,12 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import android.media.audiofx.Visualizer
+import androidx.media3.session.MediaController
+import androidx.media3.session.SessionToken
+import android.content.ComponentName
+import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.MoreExecutors
+import kotlin.OptIn
 
 @OptIn(UnstableApi::class)
 class MainActivity : ComponentActivity() {
@@ -68,18 +73,56 @@ class MainActivity : ComponentActivity() {
     private var mediaFiles by mutableStateOf<List<DocumentFile>>(emptyList())
     private var selectedIndex by mutableStateOf(-1)
 
+    private var controllerFuture: ListenableFuture<MediaController>? = null
+    private var player by mutableStateOf<Player?>(null)
+
     private val openDocumentTree = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         uri?.let { selectedUri ->
             contentResolver.takePersistableUriPermission(
                 selectedUri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION
             )
+            saveLastFolder(selectedUri)
             loadDirectory(selectedUri)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        val sessionToken = SessionToken(this, ComponentName(this, PlaybackService::class.java))
+        controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
+        controllerFuture?.addListener({
+            player = controllerFuture?.get()
+        }, MoreExecutors.directExecutor())
+    }
+
+    override fun onStop() {
+        super.onStop()
+        controllerFuture?.let {
+            MediaController.releaseFuture(it)
+        }
+        player = null
+    }
+
+    private fun saveLastFolder(uri: Uri) {
+        val prefs = getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
+        prefs.edit().putString("last_folder_uri", uri.toString()).apply()
+    }
+
+    private fun loadLastFolder() {
+        val prefs = getSharedPreferences("player_prefs", Context.MODE_PRIVATE)
+        val uriStr = prefs.getString("last_folder_uri", null)
+        if (uriStr != null) {
+            try {
+                val uri = Uri.parse(uriStr)
+                loadDirectory(uri)
+            } catch (e: Exception) {}
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        loadLastFolder()
         setContent {
             var isDarkTheme by remember { mutableStateOf(true) }
             ModernPlayerTheme(darkTheme = isDarkTheme) {
@@ -89,7 +132,8 @@ class MainActivity : ComponentActivity() {
                     onFileClick = { index -> selectedIndex = index },
                     onFolderSelectClick = { openDocumentTree.launch(null) },
                     isDarkTheme = isDarkTheme,
-                    onThemeToggle = { isDarkTheme = !isDarkTheme }
+                    onThemeToggle = { isDarkTheme = !isDarkTheme },
+                    player = player
                 )
             }
         }
@@ -128,7 +172,8 @@ fun MainScreen(
     onFileClick: (Int) -> Unit,
     onFolderSelectClick: () -> Unit,
     isDarkTheme: Boolean,
-    onThemeToggle: () -> Unit
+    onThemeToggle: () -> Unit,
+    player: Player?
 ) {
     var isFullscreen by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -169,7 +214,8 @@ fun MainScreen(
                 isDarkTheme = isDarkTheme,
                 onThemeToggle = onThemeToggle,
                 isFullscreen = isFullscreen,
-                onFullscreenToggle = { isFullscreen = it }
+                onFullscreenToggle = { isFullscreen = it },
+                player = player
             )
         }
     }
@@ -185,7 +231,8 @@ fun PlayerScreen(
     isDarkTheme: Boolean,
     onThemeToggle: () -> Unit,
     isFullscreen: Boolean,
-    onFullscreenToggle: (Boolean) -> Unit
+    onFullscreenToggle: (Boolean) -> Unit,
+    player: Player?
 ) {
     val context = LocalContext.current
     var hasAudioPermission by remember { mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) }
@@ -193,40 +240,64 @@ fun PlayerScreen(
     var currentAudioSessionId by remember { mutableIntStateOf(0) }
     var controlsOverlayVisible by remember { mutableStateOf(false) }
 
-    val exoPlayer = remember { ExoPlayer.Builder(context).build().apply { repeatMode = Player.REPEAT_MODE_ALL } }
-
-    DisposableEffect(exoPlayer) {
+    LaunchedEffect(player) {
+        val p = player ?: return@LaunchedEffect
         val listener = object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { 
-                onFileClick(exoPlayer.currentMediaItemIndex) 
+                onFileClick(p.currentMediaItemIndex) 
             }
-
             @androidx.media3.common.util.UnstableApi
             override fun onAudioSessionIdChanged(id: Int) { 
                 currentAudioSessionId = id 
             }
-
             override fun onIsPlayingChanged(playing: Boolean) { 
-                if (playing) currentAudioSessionId = exoPlayer.audioSessionId 
+                // Tenta pegar o ID da sessão se estiver tocando
+                if (playing) {
+                    // Nota: Em Media3, o listener onAudioSessionIdChanged deve ser disparado no Controller
+                }
             }
-
-            @androidx.media3.common.util.UnstableApi
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 isVideoAvailable = tracks.groups.any { group ->
-                    if (group.type == androidx.media3.common.C.TRACK_TYPE_VIDEO) {
-                        val format = group.getTrackFormat(0)
-                        val mime = format.sampleMimeType ?: ""
-                        !mime.startsWith("image/") && !mime.contains("artwork")
-                    } else false
+                    group.type == androidx.media3.common.C.TRACK_TYPE_VIDEO
                 }
             }
         }
-        exoPlayer.addListener(listener)
-        onDispose { exoPlayer.release() }
+        p.addListener(listener)
+        // Sync initial state
+        if (p.isPlaying) currentAudioSessionId = (p as? ExoPlayer)?.audioSessionId ?: 0
     }
 
-    LaunchedEffect(mediaFiles) { if (mediaFiles.isNotEmpty()) { exoPlayer.setMediaItems(mediaFiles.map { MediaItem.fromUri(it.uri) }); exoPlayer.prepare() } }
-    LaunchedEffect(selectedIndex) { if (selectedIndex in 0 until exoPlayer.mediaItemCount && exoPlayer.currentMediaItemIndex != selectedIndex) { exoPlayer.seekToDefaultPosition(selectedIndex); exoPlayer.play() } }
+    LaunchedEffect(mediaFiles, player) { 
+        val p = player ?: return@LaunchedEffect
+        if (mediaFiles.isNotEmpty()) { 
+            // Só recarrega se a playlist for diferente ou estiver vazia
+            val currentMediaUris = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).localConfiguration?.uri }
+            val newUris = mediaFiles.map { it.uri }
+            
+            if (currentMediaUris != newUris) {
+                p.setMediaItems(mediaFiles.map { MediaItem.fromUri(it.uri) })
+                p.prepare() 
+            }
+        } 
+    }
+    
+    LaunchedEffect(selectedIndex, player) { 
+        val p = player ?: return@LaunchedEffect
+        if (selectedIndex in 0 until p.mediaItemCount) { 
+            if (p.currentMediaItemIndex != selectedIndex) {
+                p.seekToDefaultPosition(selectedIndex)
+                p.play() 
+            }
+        } 
+    }
+    
+    // Sincronizar o index inicial se o player já estiver tocando
+    LaunchedEffect(player) {
+        val p = player ?: return@LaunchedEffect
+        if (p.mediaItemCount > 0 && selectedIndex == -1) {
+            onFileClick(p.currentMediaItemIndex)
+        }
+    }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { hasAudioPermission = it }
     LaunchedEffect(Unit) { if (!hasAudioPermission) permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) }
 
@@ -279,10 +350,14 @@ fun PlayerScreen(
 
                 // Normal Player Box
                 Box(modifier = Modifier.fillMaxWidth().height(220.dp).clip(RoundedCornerShape(24.dp)).background(Color.Black)) {
-                    PlayerContent(exoPlayer, isVideoAvailable, hasAudioPermission, currentAudioSessionId, false, onFullscreenToggle, {})
+                    if (player != null) {
+                        PlayerContent(player!!, isVideoAvailable, hasAudioPermission, currentAudioSessionId, false, onFullscreenToggle, {})
+                    }
                 }
 
-                ModernMediaControls(exoPlayer, Modifier.padding(vertical = 12.dp))
+                if (player != null) {
+                    ModernMediaControls(player!!, Modifier.padding(vertical = 12.dp))
+                }
 
                 // Playlist
                 Box(
@@ -295,7 +370,7 @@ fun PlayerScreen(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(16.dp)
                     ) {
-                        items(mediaFiles.size) { index ->
+                        items(count = mediaFiles.size) { index ->
                             val isSel = index == selectedIndex
                             
                             val cardBgColor by animateColorAsState(
@@ -330,14 +405,14 @@ fun PlayerScreen(
         }
 
         // LAYER 2: Fullscreen Overlay
-        if (isFullscreen) {
+        if (isFullscreen && player != null) {
             Box(modifier = Modifier.fillMaxSize().background(Color.Black).clickable { controlsOverlayVisible = !controlsOverlayVisible }) {
-                PlayerContent(exoPlayer, isVideoAvailable, hasAudioPermission, currentAudioSessionId, true, onFullscreenToggle, { controlsOverlayVisible = !controlsOverlayVisible })
+                PlayerContent(player!!, isVideoAvailable, hasAudioPermission, currentAudioSessionId, true, onFullscreenToggle, { controlsOverlayVisible = !controlsOverlayVisible })
                 
                 // Overlaid Controls
                 AnimatedVisibility(visible = controlsOverlayVisible, enter = fadeIn() + slideInVertically { it }, exit = fadeOut() + slideOutVertically { it }, modifier = Modifier.align(Alignment.BottomCenter)) {
                     Box(modifier = Modifier.fillMaxWidth().background(Color.Black.copy(alpha = 0.6f)).padding(bottom = 32.dp)) {
-                        ModernMediaControls(exoPlayer)
+                        ModernMediaControls(player!!)
                     }
                 }
             }
@@ -347,7 +422,7 @@ fun PlayerScreen(
 
 @Composable
 fun PlayerContent(
-    exoPlayer: ExoPlayer,
+    player: Player,
     isVideoAvailable: Boolean,
     hasAudioPermission: Boolean,
     audioSessionId: Int,
@@ -358,8 +433,9 @@ fun PlayerContent(
     val context = LocalContext.current
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(
-            factory = { PlayerView(context).apply { player = exoPlayer; useController = false; useArtwork = false; setBackgroundColor(android.graphics.Color.TRANSPARENT) } },
-            modifier = Modifier.fillMaxSize().graphicsLayer(alpha = if (isVideoAvailable) 1f else 0f)
+            factory = { PlayerView(context).apply { this.player = player; useController = false; useArtwork = true; setBackgroundColor(android.graphics.Color.BLACK) } },
+            update = { it.player = player },
+            modifier = Modifier.fillMaxSize()
         )
 
         if (hasAudioPermission && audioSessionId != 0 && !isVideoAvailable) {
@@ -377,48 +453,54 @@ fun PlayerContent(
 }
 
 @Composable
-fun ModernMediaControls(exoPlayer: ExoPlayer, modifier: Modifier = Modifier) {
-    var isPlaying by remember { mutableStateOf(exoPlayer.isPlaying) }
-    var currentPos by remember { mutableLongStateOf(exoPlayer.currentPosition) }
-    var duration by remember { mutableLongStateOf(exoPlayer.duration) }
-    var shuffle by remember { mutableStateOf(exoPlayer.shuffleModeEnabled) }
-    var repeat by remember { mutableIntStateOf(exoPlayer.repeatMode) }
+fun ModernMediaControls(player: Player, modifier: Modifier = Modifier) {
+    var isPlaying by remember { mutableStateOf(player.isPlaying) }
+    var currentPos by remember { mutableLongStateOf(player.currentPosition) }
+    var duration by remember { mutableLongStateOf(player.duration) }
+    var shuffle by remember { mutableStateOf(player.shuffleModeEnabled) }
+    var repeat by remember { mutableIntStateOf(player.repeatMode) }
 
-    LaunchedEffect(isPlaying) {
+    LaunchedEffect(isPlaying, player) {
         while (isPlaying) {
-            currentPos = exoPlayer.currentPosition
-            duration = exoPlayer.duration.coerceAtLeast(0L)
+            currentPos = player.currentPosition
+            duration = player.duration.coerceAtLeast(0L)
             kotlinx.coroutines.delay(500)
         }
     }
 
-    DisposableEffect(exoPlayer) {
+    DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(p: Boolean) { isPlaying = p }
-            override fun onPlaybackStateChanged(s: Int) { duration = exoPlayer.duration.coerceAtLeast(0L) }
+            override fun onPlaybackStateChanged(s: Int) { duration = player.duration.coerceAtLeast(0L) }
             override fun onShuffleModeEnabledChanged(s: Boolean) { shuffle = s }
             override fun onRepeatModeChanged(r: Int) { repeat = r }
         }
-        exoPlayer.addListener(listener)
-        onDispose { exoPlayer.removeListener(listener) }
+        player.addListener(listener)
+        // Update state immediately
+        isPlaying = player.isPlaying
+        currentPos = player.currentPosition
+        duration = player.duration.coerceAtLeast(0L)
+        shuffle = player.shuffleModeEnabled
+        repeat = player.repeatMode
+        onDispose { player.removeListener(listener) }
     }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Slider(value = currentPos.toFloat(), onValueChange = { currentPos = it.toLong() }, onValueChangeFinished = { exoPlayer.seekTo(currentPos) }, valueRange = 0f..(if (duration > 0) duration.toFloat() else 1f), modifier = Modifier.padding(horizontal = 16.dp), colors = SliderDefaults.colors(thumbColor = Color(0xFFFF007F), activeTrackColor = Color(0xFF00D1FF)))
+        Slider(value = currentPos.toFloat(), onValueChange = { currentPos = it.toLong() }, onValueChangeFinished = { player.seekTo(currentPos) }, valueRange = 0f..(if (duration > 0) duration.toFloat() else 1f), modifier = Modifier.padding(horizontal = 16.dp), colors = SliderDefaults.colors(thumbColor = Color(0xFFFF007F), activeTrackColor = Color(0xFF00D1FF)))
         Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(formatTime(currentPos), style = MaterialTheme.typography.labelSmall)
             Text(formatTime(duration), style = MaterialTheme.typography.labelSmall)
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { exoPlayer.shuffleModeEnabled = !shuffle }) { Icon(Icons.Filled.Shuffle, null, tint = if (shuffle) Color(0xFF00D1FF) else Color.Gray) }
-            IconButton(onClick = { exoPlayer.seekToPrevious() }) { Icon(Icons.Filled.SkipPrevious, null) }
-            IconButton(onClick = { exoPlayer.seekBack() }) { Icon(Icons.Filled.Replay5, null) }
-            Surface(onClick = { if (isPlaying) exoPlayer.pause() else exoPlayer.play() }, shape = CircleShape, color = Color(0xFFFF007F), modifier = Modifier.size(56.dp)) {
+            IconButton(onClick = { player.shuffleModeEnabled = !shuffle }) { Icon(Icons.Filled.Shuffle, null, tint = if (shuffle) Color(0xFF00D1FF) else Color.Gray) }
+            IconButton(onClick = { player.seekToPrevious() }) { Icon(Icons.Filled.SkipPrevious, null) }
+            IconButton(onClick = { player.seekBack() }) { Icon(Icons.Filled.Replay5, null) }
+            Surface(onClick = { if (isPlaying) player.pause() else player.play() }, shape = CircleShape, color = Color(0xFFFF007F), modifier = Modifier.size(56.dp)) {
                 Box(contentAlignment = Alignment.Center) { Icon(if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow, null, tint = Color.White, modifier = Modifier.size(32.dp)) }
             }
-            IconButton(onClick = { exoPlayer.seekForward() }) { Icon(Icons.Filled.Forward5, null) }
-            IconButton(onClick = { exoPlayer.seekToNext() }) { Icon(Icons.Filled.SkipNext, null) }
-            IconButton(onClick = { exoPlayer.repeatMode = when(repeat) { Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE; Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL; else -> Player.REPEAT_MODE_OFF } }) { Icon(if (repeat == Player.REPEAT_MODE_ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, null, tint = if (repeat != Player.REPEAT_MODE_OFF) Color(0xFF00D1FF) else Color.Gray) }
+            IconButton(onClick = { player.seekForward() }) { Icon(Icons.Filled.Forward5, null) }
+            IconButton(onClick = { player.seekToNext() }) { Icon(Icons.Filled.SkipNext, null) }
+            IconButton(onClick = { player.repeatMode = when(repeat) { Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ONE; Player.REPEAT_MODE_ONE -> Player.REPEAT_MODE_ALL; else -> Player.REPEAT_MODE_OFF } }) { Icon(if (repeat == Player.REPEAT_MODE_ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat, null, tint = if (repeat != Player.REPEAT_MODE_OFF) Color(0xFF00D1FF) else Color.Gray) }
         }
     }
 }
@@ -469,7 +551,1072 @@ fun VisualizerGraph(audioSessionId: Int, modifier: Modifier = Modifier) {
     }
 }
 
-private fun formatTime(ms: Long): String {
+private fun
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        formatTime(ms: Long): String {
     if (ms <= 0) return "00:00"
     val totalSeconds = ms / 1000
     val min = totalSeconds / 60

@@ -63,7 +63,9 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer-dash:$media3_version")
     implementation("androidx.media3:media3-ui:$media3_version")
     implementation("androidx.media3:media3-common:$media3_version")
+    implementation("androidx.media3:media3-session:$media3_version")
     
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("com.google.guava:guava:32.1.3-android")
     implementation("com.google.errorprone:error_prone_annotations:2.23.0")
 }
