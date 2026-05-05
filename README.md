@@ -52,10 +52,7 @@ AlexMusic é um player de mídia moderno e minimalista para Android, desenvolvid
 
 ---
 
-## 📄 Licença
 
-<img width="720" height="1600" alt="Estilo black" src="https://github.com/user-attachments/assets/7698989d-acfd-43e8-9dc0-baaeb6edf804" />
-<img width="720" height="1600" alt="Estilo claro" src="https://github.com/user-attachments/assets/eb6f0665-8b20-4f3c-a8f7-c07748a57c7f" />
 
 
 
